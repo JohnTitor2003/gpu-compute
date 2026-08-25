@@ -28,7 +28,20 @@ cuBLAS is a general library. It has to pick a kernel for unknown `M,N,K`, unknow
 
 On square `N ≤ 128` the whole product fits in a handful of 32×32 CTAs (one CTA at 32³, sixteen at 128³). A specialized launch with compile-time `TILE=32` is the entire problem: coalesced GMEM, 8 KB smem, one register accumulator per thread. Launch + heuristic dominate cuBLAS’s 16 µs; the math does not.
 
-On Blackwell that gap is wider, not narrower. The 5080 has 84 SMs and a fat driver stack. A general `cublasSgemm` entry still pays for kernel selection that a size-specialized kernel skips. Tensor-core TF32 is a *different algorithm* — we print it in the CSV so nobody can hide behind it. The win column is FP32 vs FP32.
+On Blackwell that gap is wider, not narrower. The 5080 has 84 SMs and a fat driver stack. A general `cublasSgemm` entry still pays for kernel selection that a size-specialized kernel skips. Tensor-core TF32 is a *different algorithm* — 10-bit mantissa, tensor pipes, ~7×10⁻⁴ error vs FP32 ref. We ship a WMMA 16×16×8 kernel and a separate table so that column cannot hide in the FP32 win. The win column is CUDA-core FP32 vs `CUBLAS_PEDANTIC_MATH`.
+
+## Tensor cores (labeled, not the win)
+
+`sgemm_wmma_tf32` is four warps of `wmma::mma_sync` TF32 per 32×32 CTA. It is **not** the kernel that beats cuBLAS FP32.
+
+| N³ | auto FP32 | WMMA TF32 | cuBLAS FP32 | cuBLAS TF32 |
+|--:|----------:|----------:|------------:|------------:|
+| 128 | **0.30** | 0.28 | 0.19 | 0.44 |
+| 256 | **2.65** | 3.05 | 2.01 | 3.63 |
+| 512 | 3.52 | 11.36 | 11.46 | 21.59 |
+| 4096 | 23.05 | 18.14 | 36.79 | 53.07 |
+
+Naive WMMA loses to cuBLAS TF32 (0.34× at 4096³). That is also the correct result. CSV: [`results/gemm_tf32.csv`](results/gemm_tf32.csv). Occupancy write-up: [`results/nsight.md`](results/nsight.md).
 
 ## Roofline
 
@@ -45,6 +58,7 @@ Small squares sit far below the ridge (~59 FLOP/byte) — they are **launch-boun
 | vec 2D | CTA 128×128, thread 8×8, `BK=8` | **64 acc** + `float4` loads, A transposed in smem, B padded `BN+8` | large square |
 | skinny warp | 1 warp / row, stride-32 K | `N` acc, shuffle-reduce | `N ≤ 32`, tall `M,K` |
 | vec + split-K | 64×N register tile, `grid.z` splits | 16–32 acc, `atomicAdd` partials | `N = 64,128` tall |
+| **WMMA TF32** | 4× 16×16×8 MMA / CTA | tensor fragments, 10-bit | `--suite tensor` only. Not the FP32 win. |
 
 Dispatcher is [`launch_auto`](gemm/kernels.cuh): compile-time `N` picks the kernel. Occupancy math for split-K targets ≥4 CTAs/SM on 84 SMs.
 
@@ -52,12 +66,13 @@ Dispatcher is [`launch_auto`](gemm/kernels.cuh): compile-time `N` picks the kern
 
 - Row-major `C = A @ B`. cuBLAS is called as `cublasSgemm(N,M,K, B,A,C)` so it computes the same product with no copies.
 - `CUBLAS_PEDANTIC_MATH` = true FP32. `CUBLAS_TF32_TENSOR_OP_MATH` is reported, never used as the win condition.
-- CUDA events, 15 warmups, enough iterations for ~150 ms of GPU work. Relative error vs cuBLAS `< 1e-6`.
+- CUDA events, 15 warmups, enough iterations for ~150 ms of GPU work. FP32 relative error vs cuBLAS `< 1e-6`. TF32 WMMA vs that same FP32 ref is ~7×10⁻⁴ — different algorithm, different error.
 
 ```powershell
 ./scripts/build.ps1
 $env:PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\x64;" + $env:PATH
 ./build/bin/gemm_bench.exe --suite win --csv results/gemm.csv
+./build/bin/gemm_bench.exe --suite tensor --csv results/gemm_tf32.csv
 python scripts/plot_gemm.py results/gemm.csv results
 ```
 

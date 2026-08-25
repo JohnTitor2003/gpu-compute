@@ -2,6 +2,7 @@
 // Copyright (c) 2026 JohnTitor2003. All rights reserved. See LICENSE.
 
 #include <cuda_runtime.h>
+#include <mma.h>
 
 // Row-major SGEMM: C[M,N] = alpha * A[M,K] * B[K,N] + beta * C[M,N]
 //
@@ -316,6 +317,56 @@ inline int occupancy_splits(int M, int N, int BM, int BN) {
   if (splits > 16)
     splits = 16;
   return splits;
+}
+
+// Tensor-core TF32 (WMMA 16x16x8). DIFFERENT ALGORITHM from the FP32
+// kernels: 10-bit mantissa vs 23-bit, tensor pipes vs CUDA cores.
+// Never mix this column with "beats cuBLAS FP32."
+__global__ void sgemm_wmma_tf32(int M, int N, int K, float alpha,
+                                const float* __restrict__ A,
+                                const float* __restrict__ B, float beta,
+                                float* __restrict__ C) {
+  using namespace nvcuda;
+  constexpr int WM = 16, WN = 16, WK = 8;
+  constexpr int WARPS_N = 2, WARPS_M = 2;
+  constexpr int BM = WARPS_M * WM;
+  constexpr int BN = WARPS_N * WN;
+
+  const int warp = int(threadIdx.x) >> 5;
+  const int warp_m = warp / WARPS_N;
+  const int warp_n = warp % WARPS_N;
+  const int cRow = int(blockIdx.y) * BM + warp_m * WM;
+  const int cCol = int(blockIdx.x) * BN + warp_n * WN;
+
+  wmma::fragment<wmma::matrix_a, WM, WN, WK, wmma::precision::tf32,
+                 wmma::row_major>
+      a_frag;
+  wmma::fragment<wmma::matrix_b, WM, WN, WK, wmma::precision::tf32,
+                 wmma::row_major>
+      b_frag;
+  wmma::fragment<wmma::accumulator, WM, WN, WK, float> acc;
+  wmma::fill_fragment(acc, 0.f);
+
+  if (cRow < M && cCol < N) {
+    for (int k = 0; k < K; k += WK) {
+      wmma::load_matrix_sync(a_frag, A + cRow * K + k, K);
+      wmma::load_matrix_sync(b_frag, B + k * N + cCol, N);
+      wmma::mma_sync(acc, a_frag, b_frag, acc);
+    }
+#pragma unroll
+    for (int i = 0; i < acc.num_elements; ++i)
+      acc.x[i] = alpha * acc.x[i];
+    wmma::store_matrix_sync(C + cRow * N + cCol, acc, N, wmma::mem_row_major);
+  }
+}
+
+inline void launch_wmma(int M, int N, int K, float alpha, const float* A,
+                        const float* B, float beta, float* C,
+                        cudaStream_t s = nullptr) {
+  // WMMA tiles are 16x16x8; CTA covers 32x32 with 4 warps.
+  dim3 block(128);
+  dim3 grid(ceil_div(N, 32), ceil_div(M, 32));
+  sgemm_wmma_tf32<<<grid, block, 0, s>>>(M, N, K, alpha, A, B, beta, C);
 }
 
 inline void launch_auto(int M, int N, int K, float alpha, const float* A,

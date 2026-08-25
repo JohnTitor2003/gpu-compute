@@ -29,6 +29,7 @@ function Profile([string]$name, [string[]]$args) {
 }
 
 # Square 128: the headline kernel (32x32 tiled via auto).
-Profile "square128" @("--m","128","--n","128","--k","128","--skip-ladder","--warmup","3","--iters","8")
-Profile "square64" @("--m","64","--n","64","--k","64","--skip-ladder","--warmup","3","--iters","8")
+Profile "square128_auto" @("--m","128","--n","128","--k","128","--only","auto","--warmup","3","--iters","8")
+Profile "square4096_auto" @("--m","4096","--n","4096","--k","4096","--only","auto","--warmup","2","--iters","4")
+Profile "square4096_wmma" @("--m","4096","--n","4096","--k","4096","--only","wmma","--warmup","2","--iters","4")
 Write-Host "reports in $out\ncu_*.ncu-rep / .csv" -ForegroundColor Green

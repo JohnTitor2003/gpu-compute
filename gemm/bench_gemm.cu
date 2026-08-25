@@ -81,9 +81,9 @@ static float max_rel_err(const std::vector<float>& ref,
 struct Row {
   std::string label;
   int M, N, K;
-  float naive, tiled, vec, ours, cublas_fp32, cublas_tf32, err;
+  float naive, tiled, vec, ours, wmma, cublas_fp32, cublas_tf32, err, err_tf32;
   bool beat;
-  bool have_naive, have_tiled, have_vec;
+  bool have_naive, have_tiled, have_vec, have_wmma;
 };
 
 static void print_table(const char* title, const std::vector<Row>& rows) {
@@ -127,10 +127,16 @@ int main(int argc, char** argv) {
   const int iters_cli = std::atoi(arg_value(argc, argv, "--iters", "0").c_str());
   const std::string suite = arg_value(argc, argv, "--suite", "win");
   const std::string csv_path = arg_value(argc, argv, "--csv", "");
-  const bool skip_naive = arg_flag(argc, argv, "--skip-naive") || suite == "win";
-  const bool skip_ladder = arg_flag(argc, argv, "--skip-ladder");
+  const std::string only = arg_value(argc, argv, "--only", "");
+  const bool skip_naive = arg_flag(argc, argv, "--skip-naive") || suite == "win" ||
+                          suite == "tensor" || !only.empty();
+  const bool skip_ladder = arg_flag(argc, argv, "--skip-ladder") ||
+                           suite == "tensor" || !only.empty();
   const bool do_naive = !skip_naive && !skip_ladder;
   const bool do_ladder = !skip_ladder;
+  const bool do_wmma = only.empty() || only == "wmma";
+  const bool do_auto = only.empty() || only == "auto";
+  const bool do_cublas = only.empty() || only == "cublas";
 
   const int one_m = std::atoi(arg_value(argc, argv, "--m", "0").c_str());
   const int one_n = std::atoi(arg_value(argc, argv, "--n", "0").c_str());
@@ -188,6 +194,13 @@ int main(int argc, char** argv) {
       skinny.push_back({8192, n, 8192});
   }
 
+  if (suite == "tensor") {
+    squares.clear();
+    skinny.clear();
+    for (int n : {128, 256, 512, 1024, 2048, 4096})
+      squares.push_back({n, n, n});
+  }
+
   FILE* csv = nullptr;
   if (!csv_path.empty()) {
     ensure_parent_dir(csv_path);
@@ -200,10 +213,11 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "cannot write %s\n", csv_path.c_str());
       return 1;
     }
-    std::fprintf(csv, "family,shape,M,N,K,ai,auto_ms,cublas_fp32_ms,cublas_"
-                      "tf32_ms,tiled_ms,vec_ms,naive_ms,auto_tflops,cublas_"
-                      "fp32_tflops,cublas_tf32_tflops,speedup_fp32,win,"
-                      "relerr,bytes\n");
+    std::fprintf(
+        csv, "family,shape,M,N,K,ai,auto_ms,wmma_tf32_ms,cublas_fp32_ms,cublas_"
+             "tf32_ms,tiled_ms,vec_ms,naive_ms,auto_tflops,wmma_tf32_tflops,"
+             "cublas_fp32_tflops,cublas_tf32_tflops,speedup_fp32,win,relerr,"
+             "relerr_tf32,bytes\n");
   }
 
   std::vector<Row> square_rows, skinny_rows;
@@ -238,6 +252,7 @@ int main(int argc, char** argv) {
     r.have_naive = do_naive && (flop(M, N, K) < 5e10);
     r.have_tiled = do_ladder;
     r.have_vec = do_ladder;
+    r.have_wmma = do_wmma && (M % 32 == 0) && (N % 32 == 0) && (K % 8 == 0);
 
     if (r.have_naive)
       r.naive = bench_ms(launch_naive, M, N, K, alpha, A, B, beta, C, warmup, it);
@@ -245,17 +260,27 @@ int main(int argc, char** argv) {
       r.tiled = bench_ms(launch_tiled, M, N, K, alpha, A, B, beta, C, warmup, it);
     if (r.have_vec)
       r.vec = bench_ms(launch_vec, M, N, K, alpha, A, B, beta, C, warmup, it);
-    r.ours = bench_ms(launch_auto, M, N, K, alpha, A, B, beta, C, warmup, it);
-
-    CUDA_CHECK(cudaMemcpy(hC.data(), C, hC.size() * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(
         cudaMemcpy(hRef.data(), Cref, hRef.size() * 4, cudaMemcpyDeviceToHost));
-    r.err = max_rel_err(hRef, hC);
 
-    r.cublas_fp32 = run_cublas(M, N, K, A, B, C, CUBLAS_PEDANTIC_MATH, it);
-    r.cublas_tf32 =
-        run_cublas(M, N, K, A, B, C, CUBLAS_TF32_TENSOR_OP_MATH, it);
-    r.beat = r.ours < r.cublas_fp32;
+    if (do_auto) {
+      r.ours = bench_ms(launch_auto, M, N, K, alpha, A, B, beta, C, warmup, it);
+      CUDA_CHECK(cudaMemcpy(hC.data(), C, hC.size() * 4, cudaMemcpyDeviceToHost));
+      r.err = max_rel_err(hRef, hC);
+    }
+    if (r.have_wmma) {
+      r.wmma = bench_ms(launch_wmma, M, N, K, alpha, A, B, beta, C, warmup, it);
+      std::vector<float> hW(hC.size());
+      CUDA_CHECK(cudaMemcpy(hW.data(), C, hW.size() * 4, cudaMemcpyDeviceToHost));
+      r.err_tf32 = max_rel_err(hRef, hW);
+    }
+
+    if (do_cublas) {
+      r.cublas_fp32 = run_cublas(M, N, K, A, B, C, CUBLAS_PEDANTIC_MATH, it);
+      r.cublas_tf32 =
+          run_cublas(M, N, K, A, B, C, CUBLAS_TF32_TENSOR_OP_MATH, it);
+    }
+    r.beat = do_auto && do_cublas && r.ours < r.cublas_fp32;
 
     cudaFree(A);
     cudaFree(B);
@@ -263,24 +288,32 @@ int main(int argc, char** argv) {
     cudaFree(Cref);
     out.push_back(r);
 
-    const float sp = r.cublas_fp32 / r.ours;
-    std::printf("  %s  auto %7.1f µs  %5.2f TF/s | cublasFP32 %7.1f µs  "
-                "%5.2f TF/s | %s **%.2fx**  err %.1e  AI %.1f\n",
-                r.label.c_str(), r.ours * 1e3f, tflops(M, N, K, r.ours),
-                r.cublas_fp32 * 1e3f, tflops(M, N, K, r.cublas_fp32),
-                r.beat ? "WIN" : "lose", sp, r.err, ai(M, N, K));
+    const float sp = (do_auto && do_cublas && r.ours > 0.f)
+                         ? r.cublas_fp32 / r.ours
+                         : 0.f;
+    std::printf("  %s  auto %6.2f TF/s | wmmaTF32 %6.2f | cublasFP32 %6.2f | "
+                "cublasTF32 %6.2f | %s **%.2fx**  fp32err %.1e  tf32err %.1e\n",
+                r.label.c_str(),
+                do_auto ? tflops(M, N, K, r.ours) : 0.0,
+                r.have_wmma ? tflops(M, N, K, r.wmma) : 0.0,
+                do_cublas ? tflops(M, N, K, r.cublas_fp32) : 0.0,
+                do_cublas ? tflops(M, N, K, r.cublas_tf32) : 0.0,
+                r.beat ? "WIN-FP32" : "lose-FP32", sp, r.err, r.err_tf32);
     std::fflush(stdout);
 
     if (csv) {
-      std::fprintf(csv,
-                   "%s,%s,%d,%d,%d,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%."
-                   "4f,%.4f,%.4f,%d,%.3e,%.0f\n",
-                   family, r.label.c_str(), M, N, K, ai(M, N, K), r.ours,
-                   r.cublas_fp32, r.cublas_tf32, r.have_tiled ? r.tiled : -1,
-                   r.have_vec ? r.vec : -1, r.have_naive ? r.naive : -1,
-                   tflops(M, N, K, r.ours), tflops(M, N, K, r.cublas_fp32),
-                   tflops(M, N, K, r.cublas_tf32), sp, r.beat ? 1 : 0, r.err,
-                   bytes_moved(M, N, K));
+      std::fprintf(
+          csv,
+          "%s,%s,%d,%d,%d,%.4f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%."
+          "4f,%.4f,%.4f,%d,%.3e,%.3e,%.0f\n",
+          family, r.label.c_str(), M, N, K, ai(M, N, K), r.ours,
+          r.have_wmma ? r.wmma : -1, r.cublas_fp32, r.cublas_tf32,
+          r.have_tiled ? r.tiled : -1, r.have_vec ? r.vec : -1,
+          r.have_naive ? r.naive : -1, do_auto ? tflops(M, N, K, r.ours) : -1,
+          r.have_wmma ? tflops(M, N, K, r.wmma) : -1,
+          do_cublas ? tflops(M, N, K, r.cublas_fp32) : -1,
+          do_cublas ? tflops(M, N, K, r.cublas_tf32) : -1, sp, r.beat ? 1 : 0,
+          r.err, r.err_tf32, bytes_moved(M, N, K));
       std::fflush(csv);
     }
   };
@@ -296,10 +329,28 @@ int main(int argc, char** argv) {
       run_shape(sh.M, sh.N, sh.K, "skinny", skinny_rows);
   }
 
-  if (!square_rows.empty())
+  if (!square_rows.empty() && suite != "tensor")
     print_table("Square SGEMM", square_rows);
   if (!skinny_rows.empty())
     print_table("Skinny SGEMM  (N≤128)", skinny_rows);
+  if (suite == "tensor" && !square_rows.empty()) {
+    std::printf("\n## Tensor-core TF32 vs CUDA-core FP32  (different algorithms)\n\n");
+    std::printf("| shape | auto FP32 TF/s | WMMA TF32 TF/s | cuBLAS FP32 | "
+                "cuBLAS TF32 | WMMA vs cuBLAS TF32 | WMMA err vs FP32 ref |\n");
+    std::printf("|------:|---------------:|---------------:|------------:|"
+                "------------:|--------------------:|---------------------:|\n");
+    for (const auto& r : square_rows) {
+      const float sp_tc =
+          (r.have_wmma && r.cublas_tf32 > 0.f) ? r.cublas_tf32 / r.wmma : 0.f;
+      std::printf("| %s | %.2f | %.2f | %.2f | %.2f | %.2fx | %.1e |\n",
+                  r.label.c_str(), tflops(r.M, r.N, r.K, r.ours),
+                  r.have_wmma ? tflops(r.M, r.N, r.K, r.wmma) : 0.0,
+                  tflops(r.M, r.N, r.K, r.cublas_fp32),
+                  tflops(r.M, r.N, r.K, r.cublas_tf32), sp_tc, r.err_tf32);
+    }
+    std::printf("\nWMMA TF32 is 10-bit mantissa. Do not read this table as "
+                "the FP32 win claim.\n");
+  }
 
   int wins = 0, total = 0;
   auto tally = [&](const std::vector<Row>& v) {

@@ -4,6 +4,8 @@ Hand-written row-major `C = A @ B`. Compared to `cublasSgemm` in `CUBLAS_PEDANTI
 
 **Claim, measured:** faster than cuBLAS FP32 on every square `N ∈ {32,48,64,80,96,112,128,160,192,256}`. Not faster on tall-skinny `N ≤ 128` with `M=K=4096` — cuBLAS GEMV is already on the HBM roof.
 
+A **WMMA TF32** kernel lives in the same file (`sgemm_wmma_tf32`). It is a different algorithm (tensor cores, 10-bit mantissa). `--suite tensor` prints it next to `CUBLAS_TF32_TENSOR_OP_MATH`. It does not beat production TF32 cuBLAS. It exists so nobody can “win” by silently switching math modes.
+
 ![square speedup](../results/speedup_square.png)
 
 ## Tiling
@@ -81,7 +83,9 @@ python scripts/plot_gemm.py
 | flag | |
 |---|---|
 | `--suite win` | square 32–256 and skinny N≤128 (default) |
+| `--suite tensor` | WMMA TF32 vs cuBLAS FP32/TF32, 128³–4096³ |
 | `--suite full` | up to 4096³ |
+| `--only auto\|wmma\|cublas` | single impl, for Nsight |
 | `--csv path` | machine-readable |
 | `--m --n --k` | one shape (for Nsight) |
 | `--iters N` | pin iteration count |
