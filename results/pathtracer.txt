@@ -1,0 +1,5 @@
+GPU: NVIDIA GeForce RTX 5080  sm_120  15.9 GB  84 SMs  bus 256-bit
+Scene: 2 spheres, 332 triangles, 255 BVH nodes, 7 materials
+Wrote results/cornell.png (800x800, 256 spp, 8 bounces)
+GPU  2273.81 ms   wall 2273.90 ms   72.06 M camera-paths/s
+Primary rays: 163.84 M

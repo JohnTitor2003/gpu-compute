@@ -1,0 +1,2 @@
+*.cu linguist-language=Cuda
+*.cuh linguist-language=Cuda

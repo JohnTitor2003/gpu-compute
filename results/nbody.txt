@@ -1,0 +1,20 @@
+﻿GPU: NVIDIA GeForce RTX 5080  sm_120  15.9 GB  84 SMs  bus 256-bit
+
+## N-body force kernel  N=16384
+
+| kernel | ms | interactions/s | TFLOP/s |
+|--------|---:|---------------:|--------:|
+| tiled 128 | 0.677 | 3.97e+11 | 7.93 |
+| naive     | 2.326 | 1.15e+11 | 2.31 |
+
+Speedup vs naive: **3.44x**
+
+## N-body force kernel  N=32768
+
+| kernel | ms | interactions/s | TFLOP/s |
+|--------|---:|---------------:|--------:|
+| tiled 128 | 1.781 | 6.03e+11 | 12.06 |
+
+Simulated 96 steps in 236.46 ms  (405.99 steps/s)
+Energy  E0=-1.643446  E1=-1.646312  rel drift=1.744e-03
+Wrote results/nbody.png
