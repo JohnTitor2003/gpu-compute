@@ -1,5 +1,5 @@
 #pragma once
-// Copyright (c) 2026 JohnTitor2003. MIT. See LICENSE.
+// Copyright (c) 2026 JohnTitor2003. All rights reserved. See LICENSE.
 
 #include <cuda_runtime.h>
 

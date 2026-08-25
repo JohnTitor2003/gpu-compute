@@ -63,4 +63,4 @@ python scripts/plot_gemm.py results/gemm.csv results
 
 Nsight Compute: `./scripts/profile_gemm.ps1` (needs [GPU performance counters](https://developer.nvidia.com/ERR_NVGPUCTRPERM) enabled). Software roofline above does not.
 
-MIT. CUDA 12.8+ (13.x for sm_120).
+**License: all rights reserved** — view and study only; no copy, reuse, or redistribution without written permission. See [`LICENSE`](LICENSE). CUDA 12.8+ (13.x for sm_120).
